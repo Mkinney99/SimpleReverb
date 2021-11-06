@@ -8,6 +8,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "PluginParameter.h"
 
 //==============================================================================
 SimpleReverbAudioProcessor::SimpleReverbAudioProcessor()
@@ -19,9 +20,14 @@ SimpleReverbAudioProcessor::SimpleReverbAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ),
 #endif
+    parameters (*this)
+    , paramDepth (parameters, "Depth", "", 0.0f, 1.0f, 0.5f)
+    , paramFrequency (parameters, "LFO Frequency", "Hz", 0.0f, 10.0f, 2.0f)
+    , paramWaveform (parameters, "LFO Waveform", waveformItemsUI, waveformSine)
 {
+    parameters.apvts.state = ValueTree (Identifier (getName().removeCharacters ("- ")));
 }
 
 SimpleReverbAudioProcessor::~SimpleReverbAudioProcessor()
@@ -101,6 +107,16 @@ void SimpleReverbAudioProcessor::prepareToPlay (double sampleRate, int samplesPe
 
     leftReverb.prepare(spec);
     rightReverb.prepare(spec);
+    const double smoothTime = 1e-3;
+    paramDepth.reset (sampleRate, smoothTime);
+    paramFrequency.reset (sampleRate, smoothTime);
+    paramWaveform.reset (sampleRate, smoothTime);
+
+    //======================================
+
+    lfoPhase = 0.0f;
+    inverseSampleRate = 1.0f / (float)sampleRate;
+    twoPi = 2.0f * M_PI;
 }
 
 void SimpleReverbAudioProcessor::releaseResources()
@@ -143,6 +159,7 @@ void SimpleReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
+    const int numSamples = buffer.getNumSamples();
 
     params.roomSize   = *apvts.getRawParameterValue ("size");
     params.damping    = *apvts.getRawParameterValue ("damp");
@@ -164,9 +181,97 @@ void SimpleReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     leftReverb.process  (leftContext);
     rightReverb.process (rightContext);
+    //======================================
+
+    float currentDepth = paramDepth.getNextValue();
+    float currentFrequency = paramFrequency.getNextValue();
+    float phase;
+
+    for (int channel = 0; channel < totalNumInputChannels; ++channel) {
+        float* channelData = buffer.getWritePointer (channel);
+        phase = lfoPhase;
+
+        for (int sample = 0; sample < numSamples; ++sample) {
+            const float in = channelData[sample];
+            float modulation = lfo (phase, (int)paramWaveform.getTargetValue());
+            float out = in * (1 - currentDepth + currentDepth * modulation);
+
+            channelData[sample] = out;
+
+            phase += currentFrequency * inverseSampleRate;
+            if (phase >= 1.0f)
+                phase -= 1.0f;
+        }
+    }
+
+    lfoPhase = phase;
+
+    //======================================
+
+    for (int channel = totalNumInputChannels; channel < totalNumOutputChannels; ++channel)
+        buffer.clear (channel, 0, numSamples);
 }
 
 //==============================================================================
+//==============================================================================
+
+float TremoloAudioProcessor::lfo (float phase, int waveform)
+{
+    float out = 0.0f;
+
+    switch (waveform) {
+        case waveformSine: {
+            out = 0.5f + 0.5f * sinf (twoPi * phase);
+            break;
+        }
+        case waveformTriangle: {
+            if (phase < 0.25f)
+                out = 0.5f + 2.0f * phase;
+            else if (phase < 0.75f)
+                out = 1.0f - 2.0f * (phase - 0.25f);
+            else
+                out = 2.0f * (phase - 0.75f);
+            break;
+        }
+        case waveformSawtooth: {
+            if (phase < 0.5f)
+                out = 0.5f + phase;
+            else
+                out = phase - 0.5f;
+            break;
+        }
+        case waveformInverseSawtooth: {
+            if (phase < 0.5f)
+                out = 0.5f - phase;
+            else
+                out = 1.5f - phase;
+            break;
+        }
+        case waveformSquare: {
+            if (phase < 0.5f)
+                out = 0.0f;
+            else
+                out = 1.0f;
+            break;
+        }
+        case waveformSquareSlopedEdges: {
+            if (phase < 0.48f)
+                out = 1.0f;
+            else if (phase < 0.5f)
+                out = 1.0f - 50.0f * (phase - 0.48f);
+            else if (phase < 0.98f)
+                out = 0.0f;
+            else
+                out = 50.0f * (phase - 0.98f);
+            break;
+        }
+    }
+
+    return out;
+}
+
+//==============================================================================
+
 bool SimpleReverbAudioProcessor::hasEditor() const
 {
     return true; // (change this to false if you choose to not supply an editor)
@@ -182,6 +287,9 @@ void SimpleReverbAudioProcessor::getStateInformation (juce::MemoryBlock& destDat
 {
     juce::MemoryOutputStream mos (destData, true);
     apvts.state.writeToStream (mos);
+    auto state = parameters.apvts.copyState();
+    std::unique_ptr<XmlElement> xml (state.createXml());
+    copyXmlToBinary (*xml, destData);
 }
 
 void SimpleReverbAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -190,6 +298,11 @@ void SimpleReverbAudioProcessor::setStateInformation (const void* data, int size
 
     if (tree.isValid())
         apvts.replaceState (tree);
+    std::unique_ptr<XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
+
+    if (xmlState.get() != nullptr)
+        if (xmlState->hasTagName (parameters.apvts.state.getType()))
+            parameters.apvts.replaceState (ValueTree::fromXml (*xmlState));
 }
 
 //==============================================================================
