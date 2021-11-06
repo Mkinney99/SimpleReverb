@@ -9,6 +9,9 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "PluginParameter.h"
+#define _USE_MATH_DEFINES
+#include <cmath>
 
 //==============================================================================
 /**
@@ -56,6 +59,40 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
         
     juce::AudioProcessorValueTreeState apvts { *this, nullptr, "Parameters", createParameterLayout() };
+    
+      StringArray waveformItemsUI = {
+        "Sine",
+        "Triangle",
+        "Sawtooth (rising)",
+        "Sawtooth (falling)",
+        "Square",
+        "Square with sloped edges"
+    };
+
+    enum waveformIndex {
+        waveformSine = 0,
+        waveformTriangle,
+        waveformSawtooth,
+        waveformInverseSawtooth,
+        waveformSquare,
+        waveformSquareSlopedEdges,
+    };
+
+    //======================================
+
+    float lfoPhase;
+    float inverseSampleRate;
+    float twoPi;
+
+    float lfo (float phase, int waveform);
+
+    //======================================
+
+    PluginParametersManager parameters;
+
+    PluginParameterLinSlider paramDepth;
+    PluginParameterLinSlider paramFrequency;
+    PluginParameterComboBox paramWaveform;
 
 private:
     juce::dsp::Reverb::Parameters params;
